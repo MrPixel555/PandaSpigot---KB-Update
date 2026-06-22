@@ -2,10 +2,12 @@
 set +e
 
 OUT="ci-diagnostics"
+rm -rf "$OUT"
 mkdir -p "$OUT"
 
 {
   echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "pwd=$(pwd)"
   echo "runner=${RUNNER_OS:-unknown}"
   echo "repo=${GITHUB_REPOSITORY:-unknown}"
   echo "sha=${GITHUB_SHA:-unknown}"
@@ -18,92 +20,125 @@ git status --short > "$OUT/root-git-status-short.txt" 2>&1 || true
 git status > "$OUT/root-git-status.txt" 2>&1 || true
 git log -1 --decorate --stat > "$OUT/root-last-commit.txt" 2>&1 || true
 git ls-files -s > "$OUT/root-ls-files-s.txt" 2>&1 || true
-find . -maxdepth 3 -type f | sort > "$OUT/root-file-list-depth3.txt" 2>&1 || true
 
-# Copy workflow and relevant project scripts.
+# Directory and file inventories. The previous diagnostic used only file maxdepth
+# and missed generated repositories when they were nested deeper.
+find . -maxdepth 6 -type d | sort > "$OUT/root-dir-list-depth6.txt" 2>&1 || true
+find . -maxdepth 6 -type f | sort > "$OUT/root-file-list-depth6.txt" 2>&1 || true
+find . -type d \( -name PandaSpigot-Server -o -name PandaSpigot-API -o -name PaperSpigot-Server -o -name PaperSpigot-API -o -name rebase-apply -o -name rebase-merge \) -print | sort > "$OUT/generated-repo-dir-candidates.txt" 2>&1 || true
+
 mkdir -p "$OUT/root-files"
 cp -a .github "$OUT/root-files/github" 2>/dev/null || true
 cp -a scripts "$OUT/root-files/scripts" 2>/dev/null || true
 cp -a panda "$OUT/root-files/panda" 2>/dev/null || true
 cp -a patches "$OUT/root-files/patches" 2>/dev/null || true
+cp -a .gitmodules "$OUT/root-files/gitmodules" 2>/dev/null || true
 
-# Capture failed server repository state if it exists.
-if [ -d PandaSpigot-Server ]; then
-  mkdir -p "$OUT/PandaSpigot-Server"
+capture_git_repo() {
+  local repo_path="$1"
+  local safe_name
+  safe_name=$(printf '%s' "$repo_path" | sed 's#^./##; s#[/.]#_#g')
+  local dst="$OUT/generated/$safe_name"
+  mkdir -p "$dst"
+
+  {
+    echo "repo_path=$repo_path"
+    echo "safe_name=$safe_name"
+  } > "$dst/context.txt" 2>&1 || true
 
   (
-    cd PandaSpigot-Server || exit 0
-    git status --short > "../$OUT/PandaSpigot-Server/git-status-short.txt" 2>&1 || true
-    git status > "../$OUT/PandaSpigot-Server/git-status.txt" 2>&1 || true
-    git log --oneline --decorate -20 > "../$OUT/PandaSpigot-Server/git-log-20.txt" 2>&1 || true
-    git rev-parse HEAD > "../$OUT/PandaSpigot-Server/HEAD.txt" 2>&1 || true
-    git ls-files -s > "../$OUT/PandaSpigot-Server/ls-files-s.txt" 2>&1 || true
+    cd "$repo_path" || exit 0
+    git status --short > "$(pwd -P)/../../$dst/git-status-short.txt" 2>&1 || true
+  ) 2>/dev/null || true
+
+  (
+    cd "$repo_path" || exit 0
+    git status > "$(pwd -P)/../../$dst/git-status.txt" 2>&1 || true
+  ) 2>/dev/null || true
+
+  (
+    cd "$repo_path" || exit 0
+    git log --oneline --decorate -40 > "$(pwd -P)/../../$dst/git-log-40.txt" 2>&1 || true
+    git rev-parse HEAD > "$(pwd -P)/../../$dst/HEAD.txt" 2>&1 || true
+    git ls-files -s > "$(pwd -P)/../../$dst/ls-files-s.txt" 2>&1 || true
+    git am --show-current-patch=diff > "$(pwd -P)/../../$dst/current-am-patch.diff" 2>&1 || true
+    git am --show-current-patch=raw > "$(pwd -P)/../../$dst/current-am-patch.raw" 2>&1 || true
+  ) 2>/dev/null || true
+
+  # Copy git-am/rebase failure metadata.
+  cp -a "$repo_path/.git/rebase-apply" "$dst/rebase-apply" 2>/dev/null || true
+  cp -a "$repo_path/.git/rebase-merge" "$dst/rebase-merge" 2>/dev/null || true
+  cp -a "$repo_path/.git/patch-apply-failed" "$dst/patch-apply-failed" 2>/dev/null || true
+
+  # Copy reject files, if any.
+  mkdir -p "$dst/rejects"
+  find "$repo_path" -name '*.rej' -type f -exec cp --parents '{}' "$dst/rejects" \; 2>/dev/null || true
+
+  # Copy the specific NMS/config files we are touching.
+  mkdir -p "$dst/source-files"
+  for f in \
+    src/main/java/net/minecraft/server/EntityHuman.java \
+    src/main/java/net/minecraft/server/EntityLiving.java \
+    src/main/java/net/minecraft/server/EntityArrow.java \
+    src/main/java/net/minecraft/server/EntityProjectile.java \
+    src/main/java/net/minecraft/server/EntityFishingHook.java \
+    src/main/java/net/minecraft/server/Explosion.java \
+    src/main/java/net/minecraft/server/Entity.java \
+    src/main/java/net/minecraft/server/EntityPlayer.java \
+    src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java \
+    src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java; do
+    if [ -f "$repo_path/$f" ]; then
+      mkdir -p "$dst/source-files/$(dirname "$f")"
+      cp "$repo_path/$f" "$dst/source-files/$f" 2>/dev/null || true
+      nl -ba "$repo_path/$f" > "$dst/source-files/$f.numbered.txt" 2>&1 || true
+    fi
+  done
+
+  # Diff for touched files, helpful if git-am partially applied anything.
+  (
+    cd "$repo_path" || exit 0
     git diff -- src/main/java/net/minecraft/server/EntityHuman.java \
+      src/main/java/net/minecraft/server/EntityLiving.java \
       src/main/java/net/minecraft/server/EntityArrow.java \
       src/main/java/net/minecraft/server/EntityProjectile.java \
       src/main/java/net/minecraft/server/EntityFishingHook.java \
       src/main/java/net/minecraft/server/Explosion.java \
-      > "../$OUT/PandaSpigot-Server/failed-files-diff.txt" 2>&1 || true
-    git am --show-current-patch=diff > "../$OUT/PandaSpigot-Server/current-am-patch.diff" 2>&1 || true
-    git am --show-current-patch=raw > "../$OUT/PandaSpigot-Server/current-am-patch.raw" 2>&1 || true
-  ) || true
+      src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java \
+      src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java \
+      > "$(pwd -P)/../../$dst/touched-files-diff.txt" 2>&1 || true
+  ) 2>/dev/null || true
 
-  if [ -d PandaSpigot-Server/.git/rebase-apply ]; then
-    cp -a PandaSpigot-Server/.git/rebase-apply "$OUT/PandaSpigot-Server/rebase-apply" 2>/dev/null || true
+  # Full generated repository archive. This is the decisive payload.
+  tar -czf "$dst/full-repo.tar.gz" "$repo_path" 2> "$dst/tar-full-repo.stderr.txt" || true
+}
+
+mkdir -p "$OUT/generated"
+while IFS= read -r repo_dir; do
+  [ -n "$repo_dir" ] || continue
+  capture_git_repo "$repo_dir"
+done < "$OUT/generated-repo-dir-candidates.txt"
+
+# Explicit fallback locations used by Panda/Paper patch tooling.
+for repo_dir in \
+  ./PandaSpigot-Server \
+  ./PandaSpigot-API \
+  ./base/Paper/PaperSpigot-Server \
+  ./base/Paper/PaperSpigot-API \
+  ./base/Paper/Spigot-Server \
+  ./base/Paper/Spigot-API; do
+  if [ -d "$repo_dir" ] && ! grep -Fxq "$repo_dir" "$OUT/generated-repo-dir-candidates.txt"; then
+    capture_git_repo "$repo_dir"
   fi
+done
 
-  mkdir -p "$OUT/PandaSpigot-Server/source-files/net/minecraft/server"
-  for f in \
-    EntityHuman.java \
-    EntityLiving.java \
-    EntityArrow.java \
-    EntityProjectile.java \
-    EntityFishingHook.java \
-    Explosion.java \
-    Entity.java \
-    EntityPlayer.java; do
-    if [ -f "PandaSpigot-Server/src/main/java/net/minecraft/server/$f" ]; then
-      cp "PandaSpigot-Server/src/main/java/net/minecraft/server/$f" \
-        "$OUT/PandaSpigot-Server/source-files/net/minecraft/server/$f" || true
-      nl -ba "PandaSpigot-Server/src/main/java/net/minecraft/server/$f" \
-        > "$OUT/PandaSpigot-Server/source-files/net/minecraft/server/$f.numbered.txt" 2>&1 || true
-    fi
-  done
+# Include top-level setup/apply logs when user creates them later.
+for f in setup.log patch.log build.log; do
+  cp -a "$f" "$OUT/$f" 2>/dev/null || true
+done
 
-  mkdir -p "$OUT/PandaSpigot-Server/source-files/com/hpfxd/pandaspigot"
-  if [ -d PandaSpigot-Server/src/main/java/com/hpfxd/pandaspigot ]; then
-    cp -a PandaSpigot-Server/src/main/java/com/hpfxd/pandaspigot \
-      "$OUT/PandaSpigot-Server/source-files/com/hpfxd/" 2>/dev/null || true
-  fi
-
-  tar -czf "$OUT/PandaSpigot-Server-full.tar.gz" PandaSpigot-Server 2> "$OUT/tar-PandaSpigot-Server-full.stderr.txt" || true
-fi
-
-# Capture API state if it exists.
-if [ -d PandaSpigot-API ]; then
-  (
-    cd PandaSpigot-API || exit 0
-    mkdir -p "../$OUT/PandaSpigot-API"
-    git status --short > "../$OUT/PandaSpigot-API/git-status-short.txt" 2>&1 || true
-    git log --oneline --decorate -20 > "../$OUT/PandaSpigot-API/git-log-20.txt" 2>&1 || true
-    git ls-files -s > "../$OUT/PandaSpigot-API/ls-files-s.txt" 2>&1 || true
-  ) || true
-  tar -czf "$OUT/PandaSpigot-API-full.tar.gz" PandaSpigot-API 2> "$OUT/tar-PandaSpigot-API-full.stderr.txt" || true
-fi
-
-# Include base metadata, not full base tree unless present and needed.
-if [ -d base/Paper/PaperSpigot-Server ]; then
-  mkdir -p "$OUT/base-PaperSpigot-Server"
-  (
-    cd base/Paper/PaperSpigot-Server || exit 0
-    git status --short > "../../../$OUT/base-PaperSpigot-Server/git-status-short.txt" 2>&1 || true
-    git log --oneline --decorate -20 > "../../../$OUT/base-PaperSpigot-Server/git-log-20.txt" 2>&1 || true
-    git rev-parse HEAD > "../../../$OUT/base-PaperSpigot-Server/HEAD.txt" 2>&1 || true
-  ) || true
-fi
-
-# A compact archive of all diagnostics.
 tar -czf ci-diagnostics.tar.gz "$OUT" 2> "$OUT/tar-ci-diagnostics.stderr.txt" || true
 
-echo "Diagnostic collection finished. Files:"
-find "$OUT" -maxdepth 3 -type f | sort | sed -n '1,200p' || true
+echo "Diagnostic collection finished. Generated repo candidates:"
+cat "$OUT/generated-repo-dir-candidates.txt" || true
+echo "Diagnostic files:"
+find "$OUT" -maxdepth 4 -type f | sort | sed -n '1,240p' || true
