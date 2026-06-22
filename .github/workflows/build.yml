@@ -24,11 +24,8 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global init.defaultBranch master
 
-      - name: Setup build environment
+      - name: Setup build environment and apply patches
         run: ./panda setup
-
-      - name: Apply patches
-        run: ./panda patch
 
       - name: Build
         run: ./gradlew build paperclipJar
@@ -37,9 +34,24 @@ jobs:
         run: |
           cp -v "./paperclip/build/libs/paperclip-1.8.8-R0.1-SNAPSHOT.jar" "./pandaspigot-$GITHUB_RUN_NUMBER.jar"
 
-      - name: Upload artifacts
+      - name: Upload server jar
         uses: actions/upload-artifact@v6
         with:
           name: Server JAR
           path: pandaspigot-${{ github.run_number }}.jar
           if-no-files-found: error
+
+      - name: Collect failure diagnostics
+        if: failure()
+        run: bash scripts/ci-diagnostics.sh
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: failed-workspace-${{ github.run_number }}
+          path: |
+            ci-diagnostics.tar.gz
+            ci-diagnostics/**
+          if-no-files-found: error
+          retention-days: 7

@@ -21,11 +21,23 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global init.defaultBranch master
 
-      - name: Setup build environment
+      - name: Setup build environment and apply patches
         run: ./panda setup
-
-      - name: Apply patches
-        run: ./panda patch
 
       - name: Build
         run: ./gradlew build
+
+      - name: Collect failure diagnostics
+        if: failure()
+        run: bash scripts/ci-diagnostics.sh
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: failed-workspace-pr-${{ github.run_number }}
+          path: |
+            ci-diagnostics.tar.gz
+            ci-diagnostics/**
+          if-no-files-found: error
+          retention-days: 7
