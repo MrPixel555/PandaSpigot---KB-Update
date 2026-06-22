@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mohammad Ebrahim Rahimbeiky <rahimbeiky@gmail.com>
+Date: Mon, 22 Jun 2026 22:00:00 +0400
+Subject: [PATCH] Wire combat knockback profile into NMS
+
+Routes melee knockback, sprint-hit velocity, projectile launch and impact,
+fishing hook impact, and explosion velocity through the combat profile. This
+patch is intentionally ordered immediately after ProjectileCollideEvent because
+later PandaSpigot patches change several of these same files.
+
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -1003,17 +1003,14 @@ public abstract class EntityHuman extends EntityLiving {
+ 
+                     if (flag2) {
+                         if (i > 0) {
+-                            // PandaSpigot start - Configurable knockback
+-                            com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig.KnockbackConfig knockbackConfig = entity.world.pandaSpigotConfig.knockback;
+-                            entity.g(
+-                                    -MathHelper.sin(this.yaw * 3.1415927F / 180.0F) * (float) i * knockbackConfig.extraHorizontal,
+-                                    knockbackConfig.extraVertical,
+-                                    MathHelper.cos(this.yaw * 3.1415927F / 180.0F) * (float) i * knockbackConfig.extraHorizontal);
+-                            // PandaSpigot end
+-                            this.motX *= 0.6D;
+-                            this.motZ *= 0.6D;
+-                            this.setSprinting(false);
++                            // PandaSpigot start - Combat profile knockback
++                            com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyExtraKnockback(entity, this, i);
++                            // PandaSpigot end
+                         }
++
++                        // PandaSpigot start - Combat profile attacker slowdown/sprint reset
++                        com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyAttackerPostHit(this);
++                        // PandaSpigot end
+ 
+                         if (f > 0.0F) {
+                             this.b(entity);
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -897,23 +897,7 @@ public abstract class EntityLiving extends Entity {
+     public void a(Entity entity, float f, double d0, double d1) {
+         if (this.random.nextDouble() >= this.getAttributeInstance(GenericAttributes.c).getValue()) {
+             this.ai = true;
+-            // PandaSpigot start - Configurable knockback
+-            com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig.KnockbackConfig knockbackConfig = entity.world.pandaSpigotConfig.knockback;
+-            double magnitude = MathHelper.sqrt(d0 * d0 + d1 * d1);
+-    
+-            double friction = knockbackConfig.friction;
+-            this.motX /= friction;
+-            this.motY /= friction;
+-            this.motZ /= friction;
+-    
+-            this.motX -= d0 / magnitude * knockbackConfig.horizontal;
+-            this.motY += knockbackConfig.vertical;
+-            this.motZ -= d1 / magnitude * knockbackConfig.horizontal;
+-    
+-            if (this.motY > knockbackConfig.verticalLimit) {
+-                this.motY = knockbackConfig.verticalLimit;
+-            }
+-            // PandaSpigot end
++            com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyKnockback(this, entity, d0, d1); // PandaSpigot - Combat profile knockback
+ 
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityArrow.java b/src/main/java/net/minecraft/server/EntityArrow.java
+--- a/src/main/java/net/minecraft/server/EntityArrow.java
++++ b/src/main/java/net/minecraft/server/EntityArrow.java
+@@ -95,7 +95,7 @@ public class EntityArrow extends Entity implements IProjectile {
+         this.motX = (double) (-MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F));
+         this.motZ = (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F));
+         this.motY = (double) (-MathHelper.sin(this.pitch / 180.0F * 3.1415927F));
+-        this.shoot(this.motX, this.motY, this.motZ, f * 1.5F, this.world.pandaSpigotConfig.randomArrowTrajectory ? 1.0F : 0); // PandaSpigot
++        this.shoot(this.motX, this.motY, this.motZ, f * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, 1.5F), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, this.world.pandaSpigotConfig.randomArrowTrajectory ? 1.0F : 0)); // PandaSpigot
+     }
+ 
+     protected void h() {
+@@ -239,6 +239,7 @@ public class EntityArrow extends Entity implements IProjectile {
+             if (movingobjectposition != null) {
+                 org.bukkit.craftbukkit.event.CraftEventFactory.callProjectileHitEvent(this, movingobjectposition); // CraftBukkit - Call event // PandaSpigot - movingobjectposition
+                 if (movingobjectposition.entity != null) {
++                    com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.shooter); // PandaSpigot - Combat profile arrow impact
+                     f2 = MathHelper.sqrt(this.motX * this.motX + this.motY * this.motY + this.motZ * this.motZ);
+                     int k = MathHelper.f((double) f2 * this.damage);
+ 
+@@ -369,10 +370,10 @@ public class EntityArrow extends Entity implements IProjectile {
+             }
+ 
+             this.locX += this.motX;
+             this.locY += this.motY;
+             this.locZ += this.motZ;
+-            float f3 = 0.99F;
+-            float f4 = 0.05F;
++            float f3 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.99F); // PandaSpigot - Combat profile arrow speed
++            double f4 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, 0.05D); // PandaSpigot - Combat profile arrow gravity
+ 
+             if (this.V()) {
+                 for (int l = 0; l < 4; ++l) {
+@@ -385,7 +386,7 @@ public class EntityArrow extends Entity implements IProjectile {
+             this.motX *= (double) f3;
+             this.motY *= (double) f3;
+             this.motZ *= (double) f3;
+-            this.motY -= (double) f4;
++            this.motY -= f4;
+             this.setPosition(this.locX, this.locY, this.locZ);
+             this.checkBlockCollisions();
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityProjectile.java b/src/main/java/net/minecraft/server/EntityProjectile.java
+--- a/src/main/java/net/minecraft/server/EntityProjectile.java
++++ b/src/main/java/net/minecraft/server/EntityProjectile.java
+@@ -46,9 +46,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         this.shooter = entityliving;
+         this.setSize(0.25F, 0.25F);
+         this.setPosition(entityliving.locX, entityliving.locY + (double) entityliving.getHeadHeight(), entityliving.locZ);
+-        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.locY -= 0.10000000149011612D;
+-        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.setPosition(this.locX, this.locY, this.locZ);
+     }
+ 
+@@ -65,6 +65,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+     }
+ 
+     public void shoot(EntityLiving entityliving, float f, float f1, float f2, float f3, float f4) {
++        f2 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getVerticalOffset(this, f2); // PandaSpigot - Combat profile projectile vertical offset
++        f3 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, f3); // PandaSpigot - Combat profile projectile launch speed
++        f4 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, f4); // PandaSpigot - Combat profile projectile randomness
+         float f5 = -MathHelper.sin(f1 / 180.0F * 3.1415927F) * MathHelper.cos(f / 180.0F * 3.1415927F);
+         float f6 = -MathHelper.sin((f + f2) / 180.0F * 3.1415927F);
+         float f7 = MathHelper.cos(f1 / 180.0F * 3.1415927F) * MathHelper.cos(f / 180.0F * 3.1415927F);
+@@ -87,6 +90,8 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         d0 /= (double) f2;
+         d1 /= (double) f2;
+         d2 /= (double) f2;
++        f = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, f); // PandaSpigot - Combat profile projectile launch speed
++        f1 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, f1); // PandaSpigot - Combat profile projectile randomness
+         d0 += this.random.nextGaussian() * 0.007499999832361937D * (double) f1;
+         d1 += this.random.nextGaussian() * 0.007499999832361937D * (double) f1;
+         d2 += this.random.nextGaussian() * 0.007499999832361937D * (double) f1;
+@@ -128,7 +133,7 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+                     Entity entity1 = (Entity) list.get(i);
+ 
+-                    if (entity1.ad() && (entity1 != this.shooter || this.ar >= 5)) {
++                    if (entity1.ad() && (entity1 != this.shooter || this.ar >= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSelfCollisionTicks(this, 5))) { // PandaSpigot - Combat profile self collision
+                         f1 = 0.3F;
+-                        AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow((double) f1, (double) f1, (double) f1);
++                        AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow(com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1)); // PandaSpigot - Combat profile projectile hitbox
+                         MovingObjectPosition movingobjectposition1 = axisalignedbb.a(vec3d, vec3d1);
+ 
+@@ -166,6 +171,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         }
+ 
+         if (movingobjectposition != null) {
++            if (movingobjectposition.entity != null) {
++                com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.shooter); // PandaSpigot - Combat profile projectile impact
++            }
+             if (movingobjectposition.type == MovingObjectPosition.EnumMovingObjectType.BLOCK && this.world.getType(movingobjectposition.a()).getBlock() == Blocks.PORTAL) {
+                 this.d(movingobjectposition.a());
+             } else {
+@@ -191,8 +199,8 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         this.locX += this.motX;
+         this.locY += this.motY;
+         this.locZ += this.motZ;
+-        float f2 = 0.99F;
+-        float f3 = this.j();
++        float f2 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.99F); // PandaSpigot - Combat profile projectile speed
++        double f3 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, this.j()); // PandaSpigot - Combat profile projectile gravity
+ 
+         if (this.V()) {
+             for (int k = 0; k < 4; ++k) {
+@@ -207,5 +215,5 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         this.motX *= (double) f2;
+         this.motY *= (double) f2;
+         this.motZ *= (double) f2;
+-        this.motY -= (double) f3;
++        this.motY -= f3;
+         this.setPosition(this.locX, this.locY, this.locZ);
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityFishingHook.java b/src/main/java/net/minecraft/server/EntityFishingHook.java
+--- a/src/main/java/net/minecraft/server/EntityFishingHook.java
++++ b/src/main/java/net/minecraft/server/EntityFishingHook.java
+@@ -204,6 +204,7 @@ public class EntityFishingHook extends Entity {
+             if (movingobjectposition != null) {
+                 org.bukkit.craftbukkit.event.CraftEventFactory.callProjectileHitEvent(this, movingobjectposition); // CraftBukkit - Call event // PandaSpigot - movingobjectposition
+                 if (movingobjectposition.entity != null) {
++                    com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.owner); // PandaSpigot - Combat profile fishing hook impact
+                     if (movingobjectposition.entity.damageEntity(DamageSource.projectile(this, this.owner), 0.0F)) {
+                         this.hooked = movingobjectposition.entity;
+                     }
+@@ -350,9 +351,9 @@ public class EntityFishingHook extends Entity {
+                 this.motY += d11 * 0.1D;
+                 this.motZ += d12 * 0.1D;
+             }
+ 
+-            this.motX *= 0.92D;
+-            this.motY *= 0.92D;
+-            this.motZ *= 0.92D;
+-            this.motY -= 0.03999999910593033D;
++            this.motX *= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.92F); // PandaSpigot - Combat profile fishing hook speed
++            this.motY *= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.92F); // PandaSpigot - Combat profile fishing hook speed
++            this.motZ *= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.92F); // PandaSpigot - Combat profile fishing hook speed
++            this.motY -= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, 0.03999999910593033D); // PandaSpigot - Combat profile fishing hook gravity
+             this.setPosition(this.locX, this.locY, this.locZ);
+             if (this.ak) this.die(); // PandaSpigot - Prevent going through portals
+         }
+diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
+--- a/src/main/java/net/minecraft/server/Explosion.java
++++ b/src/main/java/net/minecraft/server/Explosion.java
+@@ -111,9 +111,7 @@ public class Explosion {
+                         entity.damageEntity(DamageSource.explosion(this), (float) ((int) ((d15 * d15 + d15) / 2.0D * 8.0D * (double) this.size + 1.0D)));
+                         double d16 = EnchantmentProtection.a(entity, d15);
+ 
+-                        entity.motX += d12 * d16;
+-                        entity.motY += d13 * d16;
+-                        entity.motZ += d14 * d16;
++                        com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyExplosionImpact(entity, d12, d13, d14, d16); // PandaSpigot - Combat profile explosion impact
+                         if (entity instanceof EntityHuman && !flag) {
+                             this.k.put((EntityHuman) entity, new Vec3D(d12 * d15, d13 * d15, d14 * d15));
+                         }
