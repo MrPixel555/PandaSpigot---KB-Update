@@ -1,0 +1,1016 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mohammad Ebrahim Rahimbeiky <rahimbeiky@gmail.com>
+Date: Mon, 22 Jun 2026 22:00:00 +0400
+Subject: [PATCH] Add combat knockback profile system
+
+Adds a dedicated reloadable combat profile at knockback/profile.yml and wires
+melee knockback, projectile launch/impact, arrow impact, fishing hook impact,
+and explosion velocity through one fail-safe profile loader.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index f021fd0c7622a788b809ecbf896162912ab4b0d0..1111111111111111111111111111111111111111 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -22,6 +22,7 @@ public class PandaSpigotConfig {
+     private static PandaSpigotConfig config;
+     private static PandaSpigotWorldConfig defaultWorldConfig;
+     private static final Map<String, PandaSpigotWorldConfig> worldConfigs = new HashMap<>();
++    private static boolean commandsRegistered;
+     
+     /**
+      * Initialize the configuration, and load it from a file.
+@@ -55,6 +56,9 @@ public class PandaSpigotConfig {
+             root.set(config); // update backing node
+             loader.save(root);
+             
++            com.hpfxd.pandaspigot.knockback.KnockbackConfig.init(new File("knockback", "profile.yml"));
++            registerCommands();
++            
+             // call after save
+             initWorlds(worldsNode);
+         } catch (Exception e) {
+@@ -90,6 +94,15 @@ public class PandaSpigotConfig {
+     public static PandaSpigotConfig get() {
+         return config;
+     }
++
++    public static void registerCommands() {
++        if (commandsRegistered || net.minecraft.server.MinecraftServer.getServer() == null || net.minecraft.server.MinecraftServer.getServer().server == null) {
++            return;
++        }
++
++        net.minecraft.server.MinecraftServer.getServer().server.getCommandMap().register("knockback", "PandaSpigot", new com.hpfxd.pandaspigot.knockback.KnockbackCommand());
++        commandsRegistered = true;
++    }
+     
+     //------------------------------------------------------------------------
+ }
+diff --git a/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackCommand.java b/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2222222222222222222222222222222222222222
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackCommand.java
+@@ -0,0 +1,38 @@
++package com.hpfxd.pandaspigot.knockback;
++
++import org.bukkit.ChatColor;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++
++import java.util.Arrays;
++
++public final class KnockbackCommand extends Command {
++    public KnockbackCommand() {
++        super("knockback");
++        this.description = "Reloads PandaSpigot knockback combat profile.";
++        this.usageMessage = "/knockback reload";
++        this.setPermission("pandaspigot.command.knockback");
++        this.setAliases(Arrays.asList("kb"));
++    }
++
++    @Override
++    public boolean execute(CommandSender sender, String commandLabel, String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++
++        if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
++            try {
++                KnockbackConfig.reload();
++                sender.sendMessage(ChatColor.GREEN + "Knockback profile reloaded from knockback/profile.yml.");
++            } catch (Exception ex) {
++                sender.sendMessage(ChatColor.RED + "Knockback profile reload failed. Previous values are still active.");
++                sender.sendMessage(ChatColor.RED + ex.getMessage());
++            }
++            return true;
++        }
++
++        sender.sendMessage(ChatColor.RED + "Usage: " + this.usageMessage);
++        return true;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackConfig.java b/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3333333333333333333333333333333333333333
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackConfig.java
+@@ -0,0 +1,701 @@
++package com.hpfxd.pandaspigot.knockback;
++
++import net.minecraft.server.Entity;
++import net.minecraft.server.EntityArrow;
++import net.minecraft.server.EntityEgg;
++import net.minecraft.server.EntityEnderPearl;
++import net.minecraft.server.EntityFishingHook;
++import net.minecraft.server.EntityHuman;
++import net.minecraft.server.EntityLiving;
++import net.minecraft.server.EntityPotion;
++import net.minecraft.server.EntitySnowball;
++import net.minecraft.server.MathHelper;
++import net.minecraft.server.MinecraftServer;
++import org.bukkit.configuration.InvalidConfigurationException;
++import org.bukkit.configuration.file.YamlConfiguration;
++
++import java.io.File;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.Locale;
++
++public final class KnockbackConfig {
++    private static final String DEFAULT_CONFIG = "# This is the configuration file for a combat profile, in here you can change knockback values,\n"
++            + "# modify the knockback profile, add modules, or modify projectile values. Be careful while editing\n"
++            + "# these manually though, because this configuration can easily break!\n"
++            + "\n"
++            + "KNOCKBACK:\n"
++            + "  TYPE: \"VANILLA\"\n"
++            + "  HORIZONTAL: 0.4\n"
++            + "  VERTICAL: 0.4\n"
++            + "  VERTICAL-LIMIT: 0.4\n"
++            + "  HORIZONTAL-FRICTION: 2.0\n"
++            + "  VERTICAL-FRICTION: 2.0\n"
++            + "  EXTRA-HORIZONTAL: 0.5\n"
++            + "  EXTRA-VERTICAL: 0.1\n"
++            + "  RESET-SPRINT: true\n"
++            + "  ONE-POINT-SEVEN-KNOCKBACK: false\n"
++            + "  SLOWDOWN:\n"
++            + "    ENABLED: true\n"
++            + "    VALUE: 0.6\n"
++            + "  MAX-NO-DAMAGE-TICKS:\n"
++            + "    ENABLED: false\n"
++            + "    VALUE: 20\n"
++            + "IMPACT:\n"
++            + "  ENDER-PEARL:\n"
++            + "    ENABLED: false\n"
++            + "    HORIZONTAL: 0.4\n"
++            + "    VERTICAL: 0.4\n"
++            + "    HORIZONTAL-FRICTION: 2.0\n"
++            + "    VERTICAL-FRICTION: 2.0\n"
++            + "    VERTICAL-LIMIT: 0.4\n"
++            + "    MIN-VERTICAL-LIMIT: -1.0\n"
++            + "    MAX-NO-DAMAGE-TICKS:\n"
++            + "      ENABLED: false\n"
++            + "      VALUE: 20\n"
++            + "  SNOWBALL:\n"
++            + "    ENABLED: false\n"
++            + "    HORIZONTAL: 0.4\n"
++            + "    VERTICAL: 0.4\n"
++            + "    HORIZONTAL-FRICTION: 2.0\n"
++            + "    VERTICAL-FRICTION: 2.0\n"
++            + "    VERTICAL-LIMIT: 0.4\n"
++            + "    MIN-VERTICAL-LIMIT: -1.0\n"
++            + "    MAX-NO-DAMAGE-TICKS:\n"
++            + "      ENABLED: false\n"
++            + "      VALUE: 20\n"
++            + "  EGG:\n"
++            + "    ENABLED: false\n"
++            + "    HORIZONTAL: 0.4\n"
++            + "    VERTICAL: 0.4\n"
++            + "    HORIZONTAL-FRICTION: 2.0\n"
++            + "    VERTICAL-FRICTION: 2.0\n"
++            + "    VERTICAL-LIMIT: 0.4\n"
++            + "    MIN-VERTICAL-LIMIT: -1.0\n"
++            + "    MAX-NO-DAMAGE-TICKS:\n"
++            + "      ENABLED: false\n"
++            + "      VALUE: 20\n"
++            + "  FISHING-HOOK:\n"
++            + "    ENABLED: false\n"
++            + "    HORIZONTAL: 0.4\n"
++            + "    VERTICAL: 0.4\n"
++            + "    DIRECTION-BASED: true\n"
++            + "    FISH-VELOCITY:\n"
++            + "      ENABLED: false\n"
++            + "      MULTIPLIER: 0.1\n"
++            + "      VERTICAL-MULTIPLIER: 0.08\n"
++            + "    VERTICAL-LIMIT: 0.4\n"
++            + "    MAX-NO-DAMAGE-TICKS:\n"
++            + "      ENABLED: false\n"
++            + "      VALUE: 20\n"
++            + "    CLASSIC-RODS:\n"
++            + "      ENABLED: false\n"
++            + "      HORIZONTAL: 0.8\n"
++            + "      VERTICAL: 0.95\n"
++            + "  ARROW:\n"
++            + "    ENABLED: false\n"
++            + "    HORIZONTAL: 0.4\n"
++            + "    VERTICAL: 0.4\n"
++            + "    HORIZONTAL-FRICTION: 2.0\n"
++            + "    VERTICAL-FRICTION: 2.0\n"
++            + "    EXTRA-VERTICAL: 0.1\n"
++            + "    EXTRA-HORIZONTAL: 0.6\n"
++            + "    VERTICAL-LIMIT: 0.4\n"
++            + "    MIN-VERTICAL-LIMIT: -1.0\n"
++            + "    STRAIGHT-KNOCKBACK: false\n"
++            + "    MAX-NO-DAMAGE-TICKS:\n"
++            + "      ENABLED: false\n"
++            + "      VALUE: 20\n"
++            + "  EXPLOSION:\n"
++            + "    ENABLED: false\n"
++            + "    HORIZONTAL: 0.4\n"
++            + "    VERTICAL: 0.4\n"
++            + "    HORIZONTAL-FRICTION: 2.0\n"
++            + "    VERTICAL-FRICTION: 2.0\n"
++            + "    VERTICAL-LIMIT: 0.4\n"
++            + "    MIN-VERTICAL-LIMIT: -1.0\n"
++            + "    STRAIGHT-KNOCKBACK: false\n"
++            + "    MAX-NO-DAMAGE-TICKS:\n"
++            + "      ENABLED: false\n"
++            + "      VALUE: 20\n"
++            + "PROJECTILE:\n"
++            + "  ENDER-PEARL:\n"
++            + "    ENABLED: false\n"
++            + "    LAUNCH-SPEED: 1.5\n"
++            + "    SPEED-MULTIPLIER: 0.99\n"
++            + "    GRAVITY: 0.0\n"
++            + "    VERTICAL-OFFSET: 0.0\n"
++            + "    HORIZONTAL-OFFSET-ENABLED: true\n"
++            + "    HORIZONTAL-OFFSET: 0.16\n"
++            + "    HITBOX-SIZE: 0.01\n"
++            + "    TRAJECTORY-RANDOMNESS: 1.0\n"
++            + "    COPY-TARGET-Y-POSITION: true\n"
++            + "  SNOWBALL:\n"
++            + "    ENABLED: false\n"
++            + "    LAUNCH-SPEED: 1.5\n"
++            + "    SPEED-MULTIPLIER: 0.99\n"
++            + "    GRAVITY: 0.03\n"
++            + "    VERTICAL-OFFSET: 0.0\n"
++            + "    HORIZONTAL-OFFSET-ENABLED: true\n"
++            + "    HORIZONTAL-OFFSET: 0.16\n"
++            + "    HITBOX-SIZE: 0.25\n"
++            + "    TRAJECTORY-RANDOMNESS: 1.0\n"
++            + "    SELF-COLLISION-TICKS: 5\n"
++            + "  EGG:\n"
++            + "    ENABLED: false\n"
++            + "    LAUNCH-SPEED: 1.5\n"
++            + "    SPEED-MULTIPLIER: 0.99\n"
++            + "    GRAVITY: 0.03\n"
++            + "    VERTICAL-OFFSET: 0.0\n"
++            + "    HORIZONTAL-OFFSET-ENABLED: true\n"
++            + "    HORIZONTAL-OFFSET: 0.16\n"
++            + "    HITBOX-SIZE: 0.25\n"
++            + "    TRAJECTORY-RANDOMNESS: 1.0\n"
++            + "    SELF-COLLISION-TICKS: 5\n"
++            + "  FISHING-HOOK:\n"
++            + "    ENABLED: false\n"
++            + "    LAUNCH-SPEED: 1.5\n"
++            + "    SPEED-MULTIPLIER: 0.92\n"
++            + "    GRAVITY: 0.03999999910593033\n"
++            + "    VERTICAL-OFFSET: 0.0\n"
++            + "    HORIZONTAL-OFFSET-ENABLED: true\n"
++            + "    HORIZONTAL-OFFSET: 0.16\n"
++            + "    HITBOX-SIZE: 0.25\n"
++            + "    TRAJECTORY-RANDOMNESS: 1.0\n"
++            + "    SELF-COLLISION-TICKS: 5\n"
++            + "  ARROW:\n"
++            + "    ENABLED: false\n"
++            + "    LAUNCH-SPEED: 1.5\n"
++            + "    SPEED-MULTIPLIER: 0.99\n"
++            + "    GRAVITY: 0.05\n"
++            + "    VERTICAL-OFFSET: 0.0\n"
++            + "    HORIZONTAL-OFFSET-ENABLED: true\n"
++            + "    HORIZONTAL-OFFSET: 0.16\n"
++            + "    HITBOX-SIZE: 0.5\n"
++            + "    TRAJECTORY-RANDOMNESS: 1.0\n"
++            + "    SELF-COLLISION-TICKS: 5\n"
++            + "  SPLASH-POTION:\n"
++            + "    ENABLED: false\n"
++            + "    LAUNCH-SPEED: 0.5\n"
++            + "    SPEED-MULTIPLIER: 0.99\n"
++            + "    GRAVITY: 0.05\n"
++            + "    VERTICAL-OFFSET: -20.0\n"
++            + "    HORIZONTAL-OFFSET-ENABLED: true\n"
++            + "    HORIZONTAL-OFFSET: 0.16\n"
++            + "    HITBOX-SIZE: 0.25\n"
++            + "    TRAJECTORY-RANDOMNESS: 1.0\n"
++            + "    SELF-COLLISION-TICKS: 5\n"
++            + "    SMOOTH-POTION: false\n";
++
++    private static volatile File file = new File("knockback", "profile.yml");
++    private static volatile Profile profile = Profile.defaults();
++
++    private KnockbackConfig() {
++    }
++
++    public static synchronized void init(File profileFile) {
++        file = profileFile;
++        try {
++            reload();
++        } catch (Exception ex) {
++            MinecraftServer.LOGGER.error("Could not load knockback combat profile. Default values remain active.", ex);
++        }
++    }
++
++    public static synchronized void reload() throws IOException, InvalidConfigurationException {
++        ensureFile(file);
++
++        YamlConfiguration yaml = new YamlConfiguration();
++        yaml.load(file);
++
++        Profile loaded = Profile.defaults();
++        loaded.type = yaml.getString("KNOCKBACK.TYPE", loaded.type).toUpperCase(Locale.ROOT);
++        if (!"VANILLA".equals(loaded.type)) {
++            throw new InvalidConfigurationException("Unsupported KNOCKBACK.TYPE: " + loaded.type);
++        }
++
++        loadKnockback(yaml, loaded.knockback);
++        loadImpact(yaml, "ENDER-PEARL", loaded.enderPearlImpact);
++        loadImpact(yaml, "SNOWBALL", loaded.snowballImpact);
++        loadImpact(yaml, "EGG", loaded.eggImpact);
++        loadFishingImpact(yaml, loaded.fishingHookImpact);
++        loadArrowImpact(yaml, loaded.arrowImpact);
++        loadImpact(yaml, "EXPLOSION", loaded.explosionImpact);
++
++        loadProjectile(yaml, "ENDER-PEARL", loaded.enderPearlProjectile);
++        loadProjectile(yaml, "SNOWBALL", loaded.snowballProjectile);
++        loadProjectile(yaml, "EGG", loaded.eggProjectile);
++        loadProjectile(yaml, "FISHING-HOOK", loaded.fishingHookProjectile);
++        loadProjectile(yaml, "ARROW", loaded.arrowProjectile);
++        loadProjectile(yaml, "SPLASH-POTION", loaded.splashPotionProjectile);
++
++        validate(loaded);
++        profile = loaded;
++    }
++
++    private static void ensureFile(File file) throws IOException {
++        File parent = file.getParentFile();
++        if (parent != null && !parent.exists() && !parent.mkdirs()) {
++            throw new IOException("Could not create knockback directory: " + parent.getAbsolutePath());
++        }
++        if (!file.exists()) {
++            Files.write(file.toPath(), DEFAULT_CONFIG.getBytes(StandardCharsets.UTF_8));
++        }
++    }
++
++    private static void loadKnockback(YamlConfiguration yaml, KnockbackSettings settings) {
++        String root = "KNOCKBACK.";
++        settings.horizontal = yaml.getDouble(root + "HORIZONTAL", settings.horizontal);
++        settings.vertical = yaml.getDouble(root + "VERTICAL", settings.vertical);
++        settings.verticalLimit = yaml.getDouble(root + "VERTICAL-LIMIT", settings.verticalLimit);
++        settings.horizontalFriction = yaml.getDouble(root + "HORIZONTAL-FRICTION", settings.horizontalFriction);
++        settings.verticalFriction = yaml.getDouble(root + "VERTICAL-FRICTION", settings.verticalFriction);
++        settings.extraHorizontal = yaml.getDouble(root + "EXTRA-HORIZONTAL", settings.extraHorizontal);
++        settings.extraVertical = yaml.getDouble(root + "EXTRA-VERTICAL", settings.extraVertical);
++        settings.resetSprint = yaml.getBoolean(root + "RESET-SPRINT", settings.resetSprint);
++        settings.onePointSevenKnockback = yaml.getBoolean(root + "ONE-POINT-SEVEN-KNOCKBACK", settings.onePointSevenKnockback);
++        settings.slowdown.enabled = yaml.getBoolean(root + "SLOWDOWN.ENABLED", settings.slowdown.enabled);
++        settings.slowdown.value = yaml.getDouble(root + "SLOWDOWN.VALUE", settings.slowdown.value);
++        settings.maxNoDamageTicks.enabled = yaml.getBoolean(root + "MAX-NO-DAMAGE-TICKS.ENABLED", settings.maxNoDamageTicks.enabled);
++        settings.maxNoDamageTicks.value = yaml.getInt(root + "MAX-NO-DAMAGE-TICKS.VALUE", settings.maxNoDamageTicks.value);
++    }
++
++    private static void loadImpact(YamlConfiguration yaml, String key, ImpactSettings settings) {
++        String root = "IMPACT." + key + ".";
++        settings.enabled = yaml.getBoolean(root + "ENABLED", settings.enabled);
++        settings.horizontal = yaml.getDouble(root + "HORIZONTAL", settings.horizontal);
++        settings.vertical = yaml.getDouble(root + "VERTICAL", settings.vertical);
++        settings.horizontalFriction = yaml.getDouble(root + "HORIZONTAL-FRICTION", settings.horizontalFriction);
++        settings.verticalFriction = yaml.getDouble(root + "VERTICAL-FRICTION", settings.verticalFriction);
++        settings.verticalLimit = yaml.getDouble(root + "VERTICAL-LIMIT", settings.verticalLimit);
++        settings.minVerticalLimit = yaml.getDouble(root + "MIN-VERTICAL-LIMIT", settings.minVerticalLimit);
++        settings.straightKnockback = yaml.getBoolean(root + "STRAIGHT-KNOCKBACK", settings.straightKnockback);
++        settings.maxNoDamageTicks.enabled = yaml.getBoolean(root + "MAX-NO-DAMAGE-TICKS.ENABLED", settings.maxNoDamageTicks.enabled);
++        settings.maxNoDamageTicks.value = yaml.getInt(root + "MAX-NO-DAMAGE-TICKS.VALUE", settings.maxNoDamageTicks.value);
++    }
++
++    private static void loadFishingImpact(YamlConfiguration yaml, FishingHookImpactSettings settings) {
++        loadImpact(yaml, "FISHING-HOOK", settings);
++        String root = "IMPACT.FISHING-HOOK.";
++        settings.directionBased = yaml.getBoolean(root + "DIRECTION-BASED", settings.directionBased);
++        settings.fishVelocity.enabled = yaml.getBoolean(root + "FISH-VELOCITY.ENABLED", settings.fishVelocity.enabled);
++        settings.fishVelocity.multiplier = yaml.getDouble(root + "FISH-VELOCITY.MULTIPLIER", settings.fishVelocity.multiplier);
++        settings.fishVelocity.verticalMultiplier = yaml.getDouble(root + "FISH-VELOCITY.VERTICAL-MULTIPLIER", settings.fishVelocity.verticalMultiplier);
++        settings.classicRods.enabled = yaml.getBoolean(root + "CLASSIC-RODS.ENABLED", settings.classicRods.enabled);
++        settings.classicRods.horizontal = yaml.getDouble(root + "CLASSIC-RODS.HORIZONTAL", settings.classicRods.horizontal);
++        settings.classicRods.vertical = yaml.getDouble(root + "CLASSIC-RODS.VERTICAL", settings.classicRods.vertical);
++    }
++
++    private static void loadArrowImpact(YamlConfiguration yaml, ArrowImpactSettings settings) {
++        loadImpact(yaml, "ARROW", settings);
++        String root = "IMPACT.ARROW.";
++        settings.extraHorizontal = yaml.getDouble(root + "EXTRA-HORIZONTAL", settings.extraHorizontal);
++        settings.extraVertical = yaml.getDouble(root + "EXTRA-VERTICAL", settings.extraVertical);
++    }
++
++    private static void loadProjectile(YamlConfiguration yaml, String key, ProjectileSettings settings) {
++        String root = "PROJECTILE." + key + ".";
++        settings.enabled = yaml.getBoolean(root + "ENABLED", settings.enabled);
++        settings.launchSpeed = yaml.getDouble(root + "LAUNCH-SPEED", settings.launchSpeed);
++        settings.speedMultiplier = yaml.getDouble(root + "SPEED-MULTIPLIER", settings.speedMultiplier);
++        settings.gravity = yaml.getDouble(root + "GRAVITY", settings.gravity);
++        settings.verticalOffset = yaml.getDouble(root + "VERTICAL-OFFSET", settings.verticalOffset);
++        settings.horizontalOffsetEnabled = yaml.getBoolean(root + "HORIZONTAL-OFFSET-ENABLED", settings.horizontalOffsetEnabled);
++        settings.horizontalOffset = yaml.getDouble(root + "HORIZONTAL-OFFSET", settings.horizontalOffset);
++        settings.hitboxSize = yaml.getDouble(root + "HITBOX-SIZE", settings.hitboxSize);
++        settings.trajectoryRandomness = yaml.getDouble(root + "TRAJECTORY-RANDOMNESS", settings.trajectoryRandomness);
++        settings.selfCollisionTicks = yaml.getInt(root + "SELF-COLLISION-TICKS", settings.selfCollisionTicks);
++        settings.copyTargetYPosition = yaml.getBoolean(root + "COPY-TARGET-Y-POSITION", settings.copyTargetYPosition);
++        settings.smoothPotion = yaml.getBoolean(root + "SMOOTH-POTION", settings.smoothPotion);
++    }
++
++    private static void validate(Profile loaded) throws InvalidConfigurationException {
++        validateKnockback("KNOCKBACK", loaded.knockback);
++        validateImpact("IMPACT.ENDER-PEARL", loaded.enderPearlImpact);
++        validateImpact("IMPACT.SNOWBALL", loaded.snowballImpact);
++        validateImpact("IMPACT.EGG", loaded.eggImpact);
++        validateImpact("IMPACT.FISHING-HOOK", loaded.fishingHookImpact);
++        validateImpact("IMPACT.ARROW", loaded.arrowImpact);
++        validateImpact("IMPACT.EXPLOSION", loaded.explosionImpact);
++        validateProjectile("PROJECTILE.ENDER-PEARL", loaded.enderPearlProjectile);
++        validateProjectile("PROJECTILE.SNOWBALL", loaded.snowballProjectile);
++        validateProjectile("PROJECTILE.EGG", loaded.eggProjectile);
++        validateProjectile("PROJECTILE.FISHING-HOOK", loaded.fishingHookProjectile);
++        validateProjectile("PROJECTILE.ARROW", loaded.arrowProjectile);
++        validateProjectile("PROJECTILE.SPLASH-POTION", loaded.splashPotionProjectile);
++    }
++
++    private static void validateKnockback(String path, KnockbackSettings settings) throws InvalidConfigurationException {
++        finite(path + ".HORIZONTAL", settings.horizontal);
++        finite(path + ".VERTICAL", settings.vertical);
++        finite(path + ".VERTICAL-LIMIT", settings.verticalLimit);
++        positive(path + ".HORIZONTAL-FRICTION", settings.horizontalFriction);
++        positive(path + ".VERTICAL-FRICTION", settings.verticalFriction);
++        finite(path + ".EXTRA-HORIZONTAL", settings.extraHorizontal);
++        finite(path + ".EXTRA-VERTICAL", settings.extraVertical);
++        finite(path + ".SLOWDOWN.VALUE", settings.slowdown.value);
++        nonNegative(path + ".MAX-NO-DAMAGE-TICKS.VALUE", settings.maxNoDamageTicks.value);
++    }
++
++    private static void validateImpact(String path, ImpactSettings settings) throws InvalidConfigurationException {
++        finite(path + ".HORIZONTAL", settings.horizontal);
++        finite(path + ".VERTICAL", settings.vertical);
++        positive(path + ".HORIZONTAL-FRICTION", settings.horizontalFriction);
++        positive(path + ".VERTICAL-FRICTION", settings.verticalFriction);
++        finite(path + ".VERTICAL-LIMIT", settings.verticalLimit);
++        finite(path + ".MIN-VERTICAL-LIMIT", settings.minVerticalLimit);
++        nonNegative(path + ".MAX-NO-DAMAGE-TICKS.VALUE", settings.maxNoDamageTicks.value);
++    }
++
++    private static void validateProjectile(String path, ProjectileSettings settings) throws InvalidConfigurationException {
++        finite(path + ".LAUNCH-SPEED", settings.launchSpeed);
++        finite(path + ".SPEED-MULTIPLIER", settings.speedMultiplier);
++        finite(path + ".GRAVITY", settings.gravity);
++        finite(path + ".VERTICAL-OFFSET", settings.verticalOffset);
++        finite(path + ".HORIZONTAL-OFFSET", settings.horizontalOffset);
++        nonNegative(path + ".HITBOX-SIZE", settings.hitboxSize);
++        nonNegative(path + ".TRAJECTORY-RANDOMNESS", settings.trajectoryRandomness);
++        nonNegative(path + ".SELF-COLLISION-TICKS", settings.selfCollisionTicks);
++    }
++
++    private static void finite(String path, double value) throws InvalidConfigurationException {
++        if (Double.isNaN(value) || Double.isInfinite(value)) {
++            throw new InvalidConfigurationException(path + " must be a finite number");
++        }
++    }
++
++    private static void positive(String path, double value) throws InvalidConfigurationException {
++        finite(path, value);
++        if (value <= 0.0D) {
++            throw new InvalidConfigurationException(path + " must be greater than zero");
++        }
++    }
++
++    private static void nonNegative(String path, double value) throws InvalidConfigurationException {
++        finite(path, value);
++        if (value < 0.0D) {
++            throw new InvalidConfigurationException(path + " must not be negative");
++        }
++    }
++
++    public static void applyKnockback(EntityLiving victim, Entity source, double sourceDeltaX, double sourceDeltaZ) {
++        Profile active = profile;
++        KnockbackSettings settings = active.knockback;
++
++        if (settings.onePointSevenKnockback && sameDirection(victim, source)) {
++            return;
++        }
++
++        applyKnockbackVector(victim, -sourceDeltaX, -sourceDeltaZ, settings.horizontal, settings.vertical, settings.horizontalFriction, settings.verticalFriction, settings.verticalLimit, -Double.MAX_VALUE);
++        applyNoDamageTicks(victim, settings.maxNoDamageTicks);
++    }
++
++    public static void applyExtraKnockback(Entity target, EntityHuman attacker, int level) {
++        if (target == null || attacker == null || level <= 0) {
++            return;
++        }
++
++        KnockbackSettings settings = profile.knockback;
++        target.g(-MathHelper.sin(attacker.yaw * 3.1415927F / 180.0F) * (float) level * settings.extraHorizontal, settings.extraVertical, MathHelper.cos(attacker.yaw * 3.1415927F / 180.0F) * (float) level * settings.extraHorizontal);
++    }
++
++    public static void applyAttackerPostHit(EntityHuman attacker) {
++        if (attacker == null) {
++            return;
++        }
++
++        KnockbackSettings settings = profile.knockback;
++        if (settings.slowdown.enabled) {
++            attacker.motX *= settings.slowdown.value;
++            attacker.motZ *= settings.slowdown.value;
++        }
++        if (settings.resetSprint) {
++            attacker.setSprinting(false);
++        }
++    }
++
++    public static void applyProjectileImpact(Entity projectile, Entity hit, Entity owner) {
++        if (!(hit instanceof EntityLiving)) {
++            return;
++        }
++
++        ImpactSettings settings = impactFor(projectile);
++        if (settings == null || !settings.enabled) {
++            return;
++        }
++
++        double x = projectile.motX;
++        double z = projectile.motZ;
++        if (settings instanceof FishingHookImpactSettings) {
++            FishingHookImpactSettings fishing = (FishingHookImpactSettings) settings;
++            if (fishing.classicRods.enabled) {
++                applyKnockbackVector((EntityLiving) hit, x, z, fishing.classicRods.horizontal, fishing.classicRods.vertical, 1.0D, 1.0D, settings.verticalLimit, settings.minVerticalLimit);
++                applyNoDamageTicks((EntityLiving) hit, settings.maxNoDamageTicks);
++                return;
++            }
++            if (fishing.directionBased && owner != null) {
++                x = -MathHelper.sin(owner.yaw * 3.1415927F / 180.0F);
++                z = MathHelper.cos(owner.yaw * 3.1415927F / 180.0F);
++            }
++            if (fishing.fishVelocity.enabled && owner != null) {
++                hit.motX += (owner.locX - hit.locX) * fishing.fishVelocity.multiplier;
++                hit.motY += fishing.fishVelocity.verticalMultiplier;
++                hit.motZ += (owner.locZ - hit.locZ) * fishing.fishVelocity.multiplier;
++                hit.velocityChanged = true;
++            }
++        }
++
++        if (settings.straightKnockback && owner != null) {
++            x = -MathHelper.sin(owner.yaw * 3.1415927F / 180.0F);
++            z = MathHelper.cos(owner.yaw * 3.1415927F / 180.0F);
++        }
++
++        applyKnockbackVector((EntityLiving) hit, x, z, settings.horizontal, settings.vertical, settings.horizontalFriction, settings.verticalFriction, settings.verticalLimit, settings.minVerticalLimit);
++        if (settings instanceof ArrowImpactSettings) {
++            ArrowImpactSettings arrow = (ArrowImpactSettings) settings;
++            if (arrow.extraHorizontal != 0.0D || arrow.extraVertical != 0.0D) {
++                applyKnockbackVector((EntityLiving) hit, x, z, arrow.extraHorizontal, arrow.extraVertical, 1.0D, 1.0D, settings.verticalLimit, settings.minVerticalLimit);
++            }
++        }
++        applyNoDamageTicks((EntityLiving) hit, settings.maxNoDamageTicks);
++    }
++
++    public static void applyExplosionImpact(Entity hit, double x, double y, double z, double vanillaStrength) {
++        if (!(hit instanceof EntityLiving)) {
++            return;
++        }
++
++        ImpactSettings settings = profile.explosionImpact;
++        if (!settings.enabled) {
++            hit.motX += x * vanillaStrength;
++            hit.motY += y * vanillaStrength;
++            hit.motZ += z * vanillaStrength;
++            return;
++        }
++
++        EntityLiving living = (EntityLiving) hit;
++        living.motX /= settings.horizontalFriction;
++        living.motY /= settings.verticalFriction;
++        living.motZ /= settings.horizontalFriction;
++        living.motX += x * settings.horizontal;
++        living.motY += settings.straightKnockback ? y * settings.vertical : settings.vertical;
++        living.motZ += z * settings.horizontal;
++        clampVertical(living, settings.verticalLimit, settings.minVerticalLimit);
++        applyNoDamageTicks(living, settings.maxNoDamageTicks);
++        living.velocityChanged = true;
++    }
++
++    public static float getLaunchSpeed(Entity projectile, float vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? (float) settings.launchSpeed : vanilla;
++    }
++
++    public static float getTrajectoryRandomness(Entity projectile, float vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? (float) settings.trajectoryRandomness : vanilla;
++    }
++
++    public static float getVerticalOffset(Entity projectile, float vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? (float) settings.verticalOffset : vanilla;
++    }
++
++    public static float getSpeedMultiplier(Entity projectile, float vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? (float) settings.speedMultiplier : vanilla;
++    }
++
++    public static double getGravity(Entity projectile, double vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? settings.gravity : vanilla;
++    }
++
++    public static double getHorizontalOffset(Entity projectile, double vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        if (settings == null || !settings.enabled) {
++            return vanilla;
++        }
++        return settings.horizontalOffsetEnabled ? settings.horizontalOffset : 0.0D;
++    }
++
++    public static double getHitboxSize(Entity projectile, double vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? settings.hitboxSize : vanilla;
++    }
++
++    public static int getSelfCollisionTicks(Entity projectile, int vanilla) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled ? settings.selfCollisionTicks : vanilla;
++    }
++
++    public static boolean useSmoothPotion(Entity projectile) {
++        ProjectileSettings settings = projectileFor(projectile);
++        return settings != null && settings.enabled && settings.smoothPotion;
++    }
++
++    private static boolean sameDirection(EntityLiving victim, Entity source) {
++        if (!(source instanceof EntityLiving)) {
++            return false;
++        }
++        float diff = Math.abs(MathHelper.g(victim.yaw - source.yaw));
++        return diff < 45.0F;
++    }
++
++    private static void applyKnockbackVector(EntityLiving victim, double x, double z, double horizontal, double vertical, double horizontalFriction, double verticalFriction, double verticalLimit, double minVerticalLimit) {
++        double magnitude = Math.sqrt(x * x + z * z);
++        if (magnitude <= 1.0E-7D) {
++            return;
++        }
++
++        victim.ai = true;
++        victim.motX /= horizontalFriction;
++        victim.motY /= verticalFriction;
++        victim.motZ /= horizontalFriction;
++        victim.motX += x / magnitude * horizontal;
++        victim.motY += vertical;
++        victim.motZ += z / magnitude * horizontal;
++        clampVertical(victim, verticalLimit, minVerticalLimit);
++        victim.velocityChanged = true;
++    }
++
++    private static void clampVertical(EntityLiving living, double max, double min) {
++        if (living.motY > max) {
++            living.motY = max;
++        }
++        if (living.motY < min) {
++            living.motY = min;
++        }
++    }
++
++    private static void applyNoDamageTicks(EntityLiving victim, MaxNoDamageTicks ticks) {
++        if (ticks.enabled) {
++            victim.maxNoDamageTicks = ticks.value;
++        }
++    }
++
++    private static ImpactSettings impactFor(Entity entity) {
++        Profile active = profile;
++        if (entity instanceof EntityArrow) return active.arrowImpact;
++        if (entity instanceof EntityEnderPearl) return active.enderPearlImpact;
++        if (entity instanceof EntitySnowball) return active.snowballImpact;
++        if (entity instanceof EntityEgg) return active.eggImpact;
++        if (entity instanceof EntityFishingHook) return active.fishingHookImpact;
++        return null;
++    }
++
++    private static ProjectileSettings projectileFor(Entity entity) {
++        Profile active = profile;
++        if (entity instanceof EntityArrow) return active.arrowProjectile;
++        if (entity instanceof EntityEnderPearl) return active.enderPearlProjectile;
++        if (entity instanceof EntitySnowball) return active.snowballProjectile;
++        if (entity instanceof EntityEgg) return active.eggProjectile;
++        if (entity instanceof EntityFishingHook) return active.fishingHookProjectile;
++        if (entity instanceof EntityPotion) return active.splashPotionProjectile;
++        return null;
++    }
++
++    private static final class Profile {
++        private String type = "VANILLA";
++        private final KnockbackSettings knockback = new KnockbackSettings();
++        private final ImpactSettings enderPearlImpact = new ImpactSettings();
++        private final ImpactSettings snowballImpact = new ImpactSettings();
++        private final ImpactSettings eggImpact = new ImpactSettings();
++        private final FishingHookImpactSettings fishingHookImpact = new FishingHookImpactSettings();
++        private final ArrowImpactSettings arrowImpact = new ArrowImpactSettings();
++        private final ImpactSettings explosionImpact = new ImpactSettings();
++        private final ProjectileSettings enderPearlProjectile = new ProjectileSettings(1.5D, 0.99D, 0.0D, 0.01D);
++        private final ProjectileSettings snowballProjectile = new ProjectileSettings(1.5D, 0.99D, 0.03D, 0.25D);
++        private final ProjectileSettings eggProjectile = new ProjectileSettings(1.5D, 0.99D, 0.03D, 0.25D);
++        private final ProjectileSettings fishingHookProjectile = new ProjectileSettings(1.5D, 0.92D, 0.03999999910593033D, 0.25D);
++        private final ProjectileSettings arrowProjectile = new ProjectileSettings(1.5D, 0.99D, 0.05D, 0.5D);
++        private final ProjectileSettings splashPotionProjectile = new ProjectileSettings(0.5D, 0.99D, 0.05D, 0.25D);
++
++        private static Profile defaults() {
++            Profile profile = new Profile();
++            profile.splashPotionProjectile.verticalOffset = -20.0D;
++            return profile;
++        }
++    }
++
++    private static class KnockbackSettings {
++        private double horizontal = 0.4D;
++        private double vertical = 0.4D;
++        private double verticalLimit = 0.4D;
++        private double horizontalFriction = 2.0D;
++        private double verticalFriction = 2.0D;
++        private double extraHorizontal = 0.5D;
++        private double extraVertical = 0.1D;
++        private boolean resetSprint = true;
++        private boolean onePointSevenKnockback = false;
++        private final Slowdown slowdown = new Slowdown();
++        private final MaxNoDamageTicks maxNoDamageTicks = new MaxNoDamageTicks();
++    }
++
++    private static class ImpactSettings {
++        private boolean enabled = false;
++        private double horizontal = 0.4D;
++        private double vertical = 0.4D;
++        private double horizontalFriction = 2.0D;
++        private double verticalFriction = 2.0D;
++        private double verticalLimit = 0.4D;
++        private double minVerticalLimit = -1.0D;
++        private boolean straightKnockback = false;
++        private final MaxNoDamageTicks maxNoDamageTicks = new MaxNoDamageTicks();
++    }
++
++    private static final class ArrowImpactSettings extends ImpactSettings {
++        private double extraHorizontal = 0.6D;
++        private double extraVertical = 0.1D;
++    }
++
++    private static final class FishingHookImpactSettings extends ImpactSettings {
++        private boolean directionBased = true;
++        private final FishVelocity fishVelocity = new FishVelocity();
++        private final ClassicRods classicRods = new ClassicRods();
++    }
++
++    private static final class ProjectileSettings {
++        private boolean enabled = false;
++        private double launchSpeed;
++        private double speedMultiplier;
++        private double gravity;
++        private double verticalOffset = 0.0D;
++        private boolean horizontalOffsetEnabled = true;
++        private double horizontalOffset = 0.16D;
++        private double hitboxSize;
++        private double trajectoryRandomness = 1.0D;
++        private int selfCollisionTicks = 5;
++        private boolean copyTargetYPosition = true;
++        private boolean smoothPotion = false;
++
++        private ProjectileSettings(double launchSpeed, double speedMultiplier, double gravity, double hitboxSize) {
++            this.launchSpeed = launchSpeed;
++            this.speedMultiplier = speedMultiplier;
++            this.gravity = gravity;
++            this.hitboxSize = hitboxSize;
++        }
++    }
++
++    private static final class Slowdown {
++        private boolean enabled = true;
++        private double value = 0.6D;
++    }
++
++    private static final class MaxNoDamageTicks {
++        private boolean enabled = false;
++        private int value = 20;
++    }
++
++    private static final class FishVelocity {
++        private boolean enabled = false;
++        private double multiplier = 0.1D;
++        private double verticalMultiplier = 0.08D;
++    }
++
++    private static final class ClassicRods {
++        private boolean enabled = false;
++        private double horizontal = 0.8D;
++        private double vertical = 0.95D;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 04916c6a8ee6446e786eb23c54ae78e8d2cba84d..4444444444444444444444444444444444444444 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -1003,17 +1003,14 @@ public abstract class EntityHuman extends EntityLiving {
+ 
+                     if (flag2) {
+                         if (i > 0) {
+-                            // PandaSpigot start - Configurable knockback
+-                            com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig.KnockbackConfig knockbackConfig = entity.world.pandaSpigotConfig.knockback;
+-                            entity.g(
+-                                    -MathHelper.sin(this.yaw * 3.1415927F / 180.0F) * (float) i * knockbackConfig.extraHorizontal,
+-                                    knockbackConfig.extraVertical,
+-                                    MathHelper.cos(this.yaw * 3.1415927F / 180.0F) * (float) i * knockbackConfig.extraHorizontal);
+-                            // PandaSpigot end
+-                            this.motX *= 0.6D;
+-                            this.motZ *= 0.6D;
+-                            this.setSprinting(false);
++                            // PandaSpigot start - Combat profile knockback
++                            com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyExtraKnockback(entity, this, i);
++                            // PandaSpigot end
+                         }
++
++                        // PandaSpigot start - Combat profile attacker slowdown/sprint reset
++                        com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyAttackerPostHit(this);
++                        // PandaSpigot end
+ 
+                         if (f > 0.0F) {
+                             this.b(entity);
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 72c7e6fc8bb0a71877d6759af44d39030bcf51f5..5555555555555555555555555555555555555555 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -897,23 +897,7 @@ public abstract class EntityLiving extends Entity {
+     public void a(Entity entity, float f, double d0, double d1) {
+         if (this.random.nextDouble() >= this.getAttributeInstance(GenericAttributes.c).getValue()) {
+             this.ai = true;
+-            // PandaSpigot start - Configurable knockback
+-            com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig.KnockbackConfig knockbackConfig = entity.world.pandaSpigotConfig.knockback;
+-            double magnitude = MathHelper.sqrt(d0 * d0 + d1 * d1);
+-    
+-            double friction = knockbackConfig.friction;
+-            this.motX /= friction;
+-            this.motY /= friction;
+-            this.motZ /= friction;
+-    
+-            this.motX -= d0 / magnitude * knockbackConfig.horizontal;
+-            this.motY += knockbackConfig.vertical;
+-            this.motZ -= d1 / magnitude * knockbackConfig.horizontal;
+-    
+-            if (this.motY > knockbackConfig.verticalLimit) {
+-                this.motY = knockbackConfig.verticalLimit;
+-            }
+-            // PandaSpigot end
++            com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyKnockback(this, entity, d0, d1); // PandaSpigot - Combat profile knockback
+ 
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityArrow.java b/src/main/java/net/minecraft/server/EntityArrow.java
+index d45deff6c1358a441d3d7a659fca9c9c7b595c0f..6666666666666666666666666666666666666666 100644
+--- a/src/main/java/net/minecraft/server/EntityArrow.java
++++ b/src/main/java/net/minecraft/server/EntityArrow.java
+@@ -95,7 +95,7 @@ public class EntityArrow extends Entity implements IProjectile {
+         this.motX = (double) (-MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F));
+         this.motZ = (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F));
+         this.motY = (double) (-MathHelper.sin(this.pitch / 180.0F * 3.1415927F));
+-        this.shoot(this.motX, this.motY, this.motZ, f * 1.5F, this.world.pandaSpigotConfig.randomArrowTrajectory ? 1.0F : 0); // PandaSpigot
++        this.shoot(this.motX, this.motY, this.motZ, f * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, 1.5F), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, this.world.pandaSpigotConfig.randomArrowTrajectory ? 1.0F : 0)); // PandaSpigot
+     }
+ 
+     protected void h() {
+@@ -239,6 +239,7 @@ public class EntityArrow extends Entity implements IProjectile {
+             if (movingobjectposition != null) {
+                 org.bukkit.craftbukkit.event.CraftEventFactory.callProjectileHitEvent(this, movingobjectposition); // CraftBukkit - Call event // PandaSpigot - movingobjectposition
+                 if (movingobjectposition.entity != null) {
++                    com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.shooter); // PandaSpigot - Combat profile arrow impact
+                     f2 = MathHelper.sqrt(this.motX * this.motX + this.motY * this.motY + this.motZ * this.motZ);
+                     int k = MathHelper.f((double) f2 * this.damage);
+ 
+@@ -369,10 +370,10 @@ public class EntityArrow extends Entity implements IProjectile {
+             }
+ 
+             this.locX += this.motX;
+             this.locY += this.motY;
+             this.locZ += this.motZ;
+-            float f3 = 0.99F;
+-            float f4 = 0.05F;
++            float f3 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.99F); // PandaSpigot - Combat profile arrow speed
++            double f4 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, 0.05D); // PandaSpigot - Combat profile arrow gravity
+ 
+             if (this.V()) {
+                 for (int l = 0; l < 4; ++l) {
+@@ -385,7 +386,7 @@ public class EntityArrow extends Entity implements IProjectile {
+             this.motX *= (double) f3;
+             this.motY *= (double) f3;
+             this.motZ *= (double) f3;
+-            this.motY -= (double) f4;
++            this.motY -= f4;
+             this.setPosition(this.locX, this.locY, this.locZ);
+             this.checkBlockCollisions();
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityProjectile.java b/src/main/java/net/minecraft/server/EntityProjectile.java
+index fba0c18c6e1128d2f627c176531e4afe54bcd7df..7777777777777777777777777777777777777777 100644
+--- a/src/main/java/net/minecraft/server/EntityProjectile.java
++++ b/src/main/java/net/minecraft/server/EntityProjectile.java
+@@ -46,9 +46,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         this.shooter = entityliving;
+         this.setSize(0.25F, 0.25F);
+         this.setPosition(entityliving.locX, entityliving.locY + (double) entityliving.getHeadHeight(), entityliving.locZ);
+-        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.locY -= 0.10000000149011612D;
+-        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.setPosition(this.locX, this.locY, this.locZ);
+     }
+ 
+@@ -65,6 +65,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+     }
+ 
+     public void shoot(EntityLiving entityliving, float f, float f1, float f2, float f3, float f4) {
++        f2 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getVerticalOffset(this, f2); // PandaSpigot - Combat profile projectile vertical offset
++        f3 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, f3); // PandaSpigot - Combat profile projectile launch speed
++        f4 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, f4); // PandaSpigot - Combat profile projectile randomness
+         float f5 = -MathHelper.sin(f1 / 180.0F * 3.1415927F) * MathHelper.cos(f / 180.0F * 3.1415927F);
+         float f6 = -MathHelper.sin((f + f2) / 180.0F * 3.1415927F);
+         float f7 = MathHelper.cos(f1 / 180.0F * 3.1415927F) * MathHelper.cos(f / 180.0F * 3.1415927F);
+@@ -87,6 +90,8 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         d0 /= (double) f2;
+         d1 /= (double) f2;
+         d2 /= (double) f2;
++        f = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, f); // PandaSpigot - Combat profile projectile launch speed
++        f1 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, f1); // PandaSpigot - Combat profile projectile randomness
+         d0 += this.random.nextGaussian() * 0.007499999832361937D * (double) f1;
+         d1 += this.random.nextGaussian() * 0.007499999832361937D * (double) f1;
+         d2 += this.random.nextGaussian() * 0.007499999832361937D * (double) f1;
+@@ -128,7 +133,7 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+                     Entity entity1 = (Entity) list.get(i);
+ 
+-                    if (entity1.ad() && (entity1 != this.shooter || this.ar >= 5)) {
++                    if (entity1.ad() && (entity1 != this.shooter || this.ar >= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSelfCollisionTicks(this, 5))) { // PandaSpigot - Combat profile self collision
+                         f1 = 0.3F;
+-                        AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow((double) f1, (double) f1, (double) f1);
++                        AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow(com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1)); // PandaSpigot - Combat profile projectile hitbox
+                         MovingObjectPosition movingobjectposition1 = axisalignedbb.a(vec3d, vec3d1);
+ 
+@@ -166,6 +171,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         }
+ 
+         if (movingobjectposition != null) {
++            if (movingobjectposition.entity != null) {
++                com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.shooter); // PandaSpigot - Combat profile projectile impact
++            }
+             if (movingobjectposition.type == MovingObjectPosition.EnumMovingObjectType.BLOCK && this.world.getType(movingobjectposition.a()).getBlock() == Blocks.PORTAL) {
+                 this.d(movingobjectposition.a());
+             } else {
+@@ -191,8 +199,8 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         this.locX += this.motX;
+         this.locY += this.motY;
+         this.locZ += this.motZ;
+-        float f2 = 0.99F;
+-        float f3 = this.j();
++        float f2 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.99F); // PandaSpigot - Combat profile projectile speed
++        double f3 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, this.j()); // PandaSpigot - Combat profile projectile gravity
+ 
+         if (this.V()) {
+             for (int k = 0; k < 4; ++k) {
+@@ -207,5 +215,5 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+         this.motX *= (double) f2;
+         this.motY *= (double) f2;
+         this.motZ *= (double) f2;
+-        this.motY -= (double) f3;
++        this.motY -= f3;
+         this.setPosition(this.locX, this.locY, this.locZ);
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityFishingHook.java b/src/main/java/net/minecraft/server/EntityFishingHook.java
+index 6eca198f9f026c82b8b31d446c3953dabdc956cf..8888888888888888888888888888888888888888 100644
+--- a/src/main/java/net/minecraft/server/EntityFishingHook.java
++++ b/src/main/java/net/minecraft/server/EntityFishingHook.java
+@@ -204,6 +204,7 @@ public class EntityFishingHook extends Entity {
+             if (movingobjectposition != null) {
+                 org.bukkit.craftbukkit.event.CraftEventFactory.callProjectileHitEvent(this, movingobjectposition); // CraftBukkit - Call event // PandaSpigot - movingobjectposition
+                 if (movingobjectposition.entity != null) {
++                    com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.owner); // PandaSpigot - Combat profile fishing hook impact
+                     if (movingobjectposition.entity.damageEntity(DamageSource.projectile(this, this.owner), 0.0F)) {
+                         this.hooked = movingobjectposition.entity;
+                     }
+@@ -350,9 +351,9 @@ public class EntityFishingHook extends Entity {
+                 this.motY += d11 * 0.1D;
+                 this.motZ += d12 * 0.1D;
+             }
+ 
+-            this.motX *= 0.92D;
+-            this.motY *= 0.92D;
+-            this.motZ *= 0.92D;
+-            this.motY -= 0.03999999910593033D;
++            this.motX *= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.92F); // PandaSpigot - Combat profile fishing hook speed
++            this.motY *= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.92F); // PandaSpigot - Combat profile fishing hook speed
++            this.motZ *= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSpeedMultiplier(this, 0.92F); // PandaSpigot - Combat profile fishing hook speed
++            this.motY -= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, 0.03999999910593033D); // PandaSpigot - Combat profile fishing hook gravity
+             this.setPosition(this.locX, this.locY, this.locZ);
+             if (this.ak) this.die(); // PandaSpigot - Prevent going through portals
+         }
+diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
+index 2524e2b8d8e03e4c97464eb74a964b595584f8a7..9999999999999999999999999999999999999999 100644
+--- a/src/main/java/net/minecraft/server/Explosion.java
++++ b/src/main/java/net/minecraft/server/Explosion.java
+@@ -111,9 +111,7 @@ public class Explosion {
+                         entity.damageEntity(DamageSource.explosion(this), (float) ((int) ((d15 * d15 + d15) / 2.0D * 8.0D * (double) this.size + 1.0D)));
+                         double d16 = EnchantmentProtection.a(entity, d15);
+ 
+-                        entity.motX += d12 * d16;
+-                        entity.motY += d13 * d16;
+-                        entity.motZ += d14 * d16;
++                        com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyExplosionImpact(entity, d12, d13, d14, d16); // PandaSpigot - Combat profile explosion impact
+                         if (entity instanceof EntityHuman && !flag) {
+                             this.k.put((EntityHuman) entity, new Vec3D(d12 * d15, d13 * d15, d14 * d15));
+                         }
