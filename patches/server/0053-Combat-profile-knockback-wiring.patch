@@ -4,27 +4,59 @@ Date: Mon, 22 Jun 2026 22:55:03 +0000
 Subject: [PATCH] Wire combat knockback profile into NMS
 
 ---
- .../net/minecraft/server/EntityArrow.java     |  7 +++++--
- .../minecraft/server/EntityFishingHook.java   |  2 ++
+ .../net/minecraft/server/EntityArrow.java     | 19 ++++++++++++++-----
+ .../minecraft/server/EntityFishingHook.java   | 18 ++++++++++++++----
  .../net/minecraft/server/EntityHuman.java     | 15 ++++++--------
  .../net/minecraft/server/EntityLiving.java    | 18 +----------------
- .../minecraft/server/EntityProjectile.java    | 20 +++++++++++++------
+ .../minecraft/server/EntityProjectile.java    | 22 ++++++++++++++++------
  .../java/net/minecraft/server/Explosion.java  |  6 +++---
  6 files changed, 31 insertions(+), 37 deletions(-)
 
 diff --git a/src/main/java/net/minecraft/server/EntityArrow.java b/src/main/java/net/minecraft/server/EntityArrow.java
-index d45deff..a613ff7 100644
+index d45deff..0000000 100644
 --- a/src/main/java/net/minecraft/server/EntityArrow.java
 +++ b/src/main/java/net/minecraft/server/EntityArrow.java
-@@ -95,7 +95,7 @@ public class EntityArrow extends Entity implements IProjectile {
+@@ -69,7 +69,7 @@ public class EntityArrow extends Entity implements IProjectile {
+             this.setPositionRotation(entityliving.locX + d4, this.locY, entityliving.locZ + d5, f2, f3);
+             float f4 = (float) (d3 * 0.20000000298023224D);
+ 
+-            this.shoot(d0, d1 + (double) f4, d2, f, f1);
++            this.shoot(d0, d1 + (double) f4 + (double) com.hpfxd.pandaspigot.knockback.KnockbackConfig.getVerticalOffset(this, 0.0F), d2, com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, f), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, f1));
+         }
+     }
+ 
+@@ -89,13 +89,13 @@ public class EntityArrow extends Entity implements IProjectile {
+ 
+         this.setSize(0.5F, 0.5F);
+         this.setPositionRotation(entityliving.locX, entityliving.locY + (double) entityliving.getHeadHeight(), entityliving.locZ, entityliving.yaw, entityliving.pitch);
+-        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.locY -= 0.10000000149011612D;
+-        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.setPosition(this.locX, this.locY, this.locZ);
          this.motX = (double) (-MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F));
          this.motZ = (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F));
-         this.motY = (double) (-MathHelper.sin(this.pitch / 180.0F * 3.1415927F));
+-        this.motY = (double) (-MathHelper.sin(this.pitch / 180.0F * 3.1415927F));
 -        this.shoot(this.motX, this.motY, this.motZ, f * 1.5F, this.world.pandaSpigotConfig.randomArrowTrajectory ? 1.0F : 0); // PandaSpigot
++        this.motY = (double) (-MathHelper.sin((this.pitch + com.hpfxd.pandaspigot.knockback.KnockbackConfig.getVerticalOffset(this, 0.0F)) / 180.0F * 3.1415927F));
 +        this.shoot(this.motX, this.motY, this.motZ, f * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, 1.5F), com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, this.world.pandaSpigotConfig.randomArrowTrajectory ? 1.0F : 0)); // PandaSpigot
      }
  
      protected void h() {
+@@ -203,9 +203,10 @@ public class EntityArrow extends Entity implements IProjectile {
+             for (j = 0; j < list.size(); ++j) {
+                 Entity entity1 = (Entity) list.get(j);
+ 
+-                if (entity1.ad() && (entity1 != this.shooter || this.as >= 5)) {
++                if (entity1.ad() && (entity1 != this.shooter || this.as >= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSelfCollisionTicks(this, 5))) {
+                     f1 = 0.3F;
+-                    AxisAlignedBB axisalignedbb1 = entity1.getBoundingBox().grow((double) f1, (double) f1, (double) f1);
++                    double hitboxSize = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f1);
++                    AxisAlignedBB axisalignedbb1 = entity1.getBoundingBox().grow(hitboxSize, hitboxSize, hitboxSize);
+                     MovingObjectPosition movingobjectposition1 = axisalignedbb1.a(vec3d, vec3d1);
+ 
+                     if (movingobjectposition1 != null) {
 @@ -242,6 +242,7 @@ public class EntityArrow extends Entity implements IProjectile {
              if (movingobjectposition != null) {
                  org.bukkit.craftbukkit.event.CraftEventFactory.callProjectileHitEvent(this, movingobjectposition); // CraftBukkit - Call event // PandaSpigot - movingobjectposition
@@ -48,9 +80,49 @@ index d45deff..a613ff7 100644
              this.checkBlockCollisions();
          }
 diff --git a/src/main/java/net/minecraft/server/EntityFishingHook.java b/src/main/java/net/minecraft/server/EntityFishingHook.java
-index 6eca198..5a3c302 100644
+index 6eca198..0000000 100644
 --- a/src/main/java/net/minecraft/server/EntityFishingHook.java
 +++ b/src/main/java/net/minecraft/server/EntityFishingHook.java
+@@ -38,18 +38,20 @@ public class EntityFishingHook extends Entity {
+         this.owner.hookedFish = this;
+         this.setSize(0.25F, 0.25F);
+         this.setPositionRotation(entityhuman.locX, entityhuman.locY + (double) entityhuman.getHeadHeight(), entityhuman.locZ, entityhuman.yaw, entityhuman.pitch);
+-        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locX -= (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.locY -= 0.10000000149011612D;
+-        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * 0.16F);
++        this.locZ -= (double) (MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHorizontalOffset(this, 0.16F));
+         this.setPosition(this.locX, this.locY, this.locZ);
+         float f = 0.4F;
+ 
+         this.motX = (double) (-MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F) * f);
+         this.motZ = (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F) * f);
+-        this.motY = (double) (-MathHelper.sin(this.pitch / 180.0F * 3.1415927F) * f);
++        this.motY = (double) (-MathHelper.sin((this.pitch + com.hpfxd.pandaspigot.knockback.KnockbackConfig.getVerticalOffset(this, 0.0F)) / 180.0F * 3.1415927F) * f);
+         this.c(this.motX, this.motY, this.motZ, 1.5F, 1.0F);
+     }
+ 
+     protected void h() {}
+ 
+     public void c(double d0, double d1, double d2, float f, float f1) {
++        f = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getLaunchSpeed(this, f); // PandaSpigot - Combat profile fishing hook launch speed
++        f1 = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getTrajectoryRandomness(this, f1); // PandaSpigot - Combat profile fishing hook randomness
+         float f2 = MathHelper.sqrt(d0 * d0 + d1 * d1 + d2 * d2);
+ 
+         d0 /= (double) f2;
+@@ -167,9 +169,10 @@ public class EntityFishingHook extends Entity {
+             for (int i = 0; i < list.size(); ++i) {
+                 Entity entity1 = (Entity) list.get(i);
+ 
+-                if (entity1.ad() && (entity1 != this.owner || this.au >= 5)) {
++                if (entity1.ad() && (entity1 != this.owner || this.au >= com.hpfxd.pandaspigot.knockback.KnockbackConfig.getSelfCollisionTicks(this, 5))) {
+                     float f = 0.3F;
+-                    AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow((double) f, (double) f, (double) f);
++                    double hitboxSize = com.hpfxd.pandaspigot.knockback.KnockbackConfig.getHitboxSize(this, (double) f);
++                    AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow(hitboxSize, hitboxSize, hitboxSize);
+                     MovingObjectPosition movingobjectposition1 = axisalignedbb.a(vec3d, vec3d1);
+ 
+                     if (movingobjectposition1 != null) {
 @@ -207,6 +207,7 @@ public class EntityFishingHook extends Entity {
              if (movingobjectposition != null) {
                  org.bukkit.craftbukkit.event.CraftEventFactory.callProjectileHitEvent(this, movingobjectposition); // CraftBukkit - Call event // PandaSpigot - movingobjectposition
@@ -59,6 +131,15 @@ index 6eca198..5a3c302 100644
                      if (movingobjectposition.entity.damageEntity(DamageSource.projectile(this, this.owner), 0.0F)) {
                          this.hooked = movingobjectposition.entity;
                      }
+@@ -358,7 +361,7 @@ public class EntityFishingHook extends Entity {
+                     }
+                 }
+ 
+-                this.motY += 0.03999999910593033D * d6;
++                this.motY += com.hpfxd.pandaspigot.knockback.KnockbackConfig.getGravity(this, 0.03999999910593033D) * d6; // PandaSpigot - Combat profile fishing hook gravity
+                 if (d7 > 0.0D) {
+                     f2 = (float) ((double) f2 * 0.9D);
+                     this.motY *= 0.8D;
 @@ -365,6 +366,7 @@ public class EntityFishingHook extends Entity {
                      this.motY *= 0.8D;
                  }
@@ -68,7 +149,7 @@ index 6eca198..5a3c302 100644
                  this.motY *= (double) f2;
                  this.motZ *= (double) f2;
 diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
-index 8388bb5..f5e3db7 100644
+index 8388bb5..0000000 100644
 --- a/src/main/java/net/minecraft/server/EntityHuman.java
 +++ b/src/main/java/net/minecraft/server/EntityHuman.java
 @@ -1003,18 +1003,15 @@ public abstract class EntityHuman extends EntityLiving {
@@ -97,7 +178,7 @@ index 8388bb5..f5e3db7 100644
                              // CraftBukkit start - Add Velocity Event
                              boolean cancelled = false;
 diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
-index 1353a79..b81ba7c 100644
+index 1353a79..0000000 100644
 --- a/src/main/java/net/minecraft/server/EntityLiving.java
 +++ b/src/main/java/net/minecraft/server/EntityLiving.java
 @@ -897,23 +897,7 @@ public abstract class EntityLiving extends Entity {
@@ -126,10 +207,10 @@ index 1353a79..b81ba7c 100644
          }
      }
 diff --git a/src/main/java/net/minecraft/server/EntityProjectile.java b/src/main/java/net/minecraft/server/EntityProjectile.java
-index fba0c18..4fb3ea9 100644
+index fba0c18..0000000 100644
 --- a/src/main/java/net/minecraft/server/EntityProjectile.java
 +++ b/src/main/java/net/minecraft/server/EntityProjectile.java
-@@ -29,9 +29,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+@@ -29,13 +29,13 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
          this.projectileSource = (org.bukkit.entity.LivingEntity) entityliving.getBukkitEntity(); // CraftBukkit
          this.setSize(0.25F, 0.25F);
          this.setPositionRotation(entityliving.locX, entityliving.locY + (double) entityliving.getHeadHeight(), entityliving.locZ, entityliving.yaw, entityliving.pitch);
@@ -141,6 +222,11 @@ index fba0c18..4fb3ea9 100644
          this.setPosition(this.locX, this.locY, this.locZ);
          float f = 0.4F;
  
+         this.motX = (double) (-MathHelper.sin(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F) * f);
+         this.motZ = (double) (MathHelper.cos(this.yaw / 180.0F * 3.1415927F) * MathHelper.cos(this.pitch / 180.0F * 3.1415927F) * f);
+-        this.motY = (double) (-MathHelper.sin((this.pitch + this.l()) / 180.0F * 3.1415927F) * f);
++        this.motY = (double) (-MathHelper.sin((this.pitch + com.hpfxd.pandaspigot.knockback.KnockbackConfig.getVerticalOffset(this, this.l())) / 180.0F * 3.1415927F) * f);
+         this.shoot(this.motX, this.motY, this.motZ, this.j(), 1.0F);
 @@ -57,6 +57,8 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
      }
  
@@ -163,11 +249,12 @@ index fba0c18..4fb3ea9 100644
                      MovingObjectPosition movingobjectposition1 = axisalignedbb.a(vec3d, vec3d1);
  
                      if (movingobjectposition1 != null) {
-@@ -165,6 +168,9 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+@@ -165,6 +168,10 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
          // PandaSpigot end
  
          if (movingobjectposition != null) {
 +            if (movingobjectposition.entity != null) {
++                com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileTargetOptions(this, movingobjectposition.entity); // PandaSpigot - Combat profile projectile target options
 +                com.hpfxd.pandaspigot.knockback.KnockbackConfig.applyProjectileImpact(this, movingobjectposition.entity, this.shooter); // PandaSpigot - Combat profile projectile impact
 +            }
              if (movingobjectposition.type == MovingObjectPosition.EnumMovingObjectType.BLOCK && this.world.getType(movingobjectposition.a()).getBlock() == Blocks.PORTAL) {
@@ -197,7 +284,7 @@ index fba0c18..4fb3ea9 100644
      }
  
 diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
-index b7d410e..2079338 100644
+index b7d410e..0000000 100644
 --- a/src/main/java/net/minecraft/server/Explosion.java
 +++ b/src/main/java/net/minecraft/server/Explosion.java
 @@ -149,9 +149,9 @@ public class Explosion {

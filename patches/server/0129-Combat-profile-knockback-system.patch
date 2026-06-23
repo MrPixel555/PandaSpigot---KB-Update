@@ -92,7 +92,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000
 --- /dev/null
 +++ b/src/main/java/com/hpfxd/pandaspigot/knockback/KnockbackConfig.java
-@@ -0,0 +1,701 @@
+@@ -0,0 +1,715 @@
 +package com.hpfxd.pandaspigot.knockback;
 +
 +import net.minecraft.server.Entity;
@@ -616,7 +616,10 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +
 +    public static double getHitboxSize(Entity projectile, double vanilla) {
 +        ProjectileSettings settings = projectileFor(projectile);
-+        return settings != null && settings.enabled ? settings.hitboxSize : vanilla;
++        if (settings == null || !settings.enabled) {
++            return vanilla;
++        }
++        return settings.smoothPotion ? settings.hitboxSize + 0.1D : settings.hitboxSize;
 +    }
 +
 +    public static int getSelfCollisionTicks(Entity projectile, int vanilla) {
@@ -627,6 +630,16 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +    public static boolean useSmoothPotion(Entity projectile) {
 +        ProjectileSettings settings = projectileFor(projectile);
 +        return settings != null && settings.enabled && settings.smoothPotion;
++    }
++
++    public static void applyProjectileTargetOptions(Entity projectile, Entity target) {
++        ProjectileSettings settings = projectileFor(projectile);
++        if (settings == null || !settings.enabled || target == null) {
++            return;
++        }
++        if (settings.copyTargetYPosition) {
++            projectile.locY = target.locY;
++        }
 +    }
 +
 +    private static boolean sameDirection(EntityLiving victim, Entity source) {
@@ -708,6 +721,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +
 +        private static Profile defaults() {
 +            Profile profile = new Profile();
++            profile.enderPearlProjectile.copyTargetYPosition = true;
 +            profile.splashPotionProjectile.verticalOffset = -20.0D;
 +            return profile;
 +        }
@@ -761,7 +775,7 @@ index 0000000000000000000000000000000000000000..00000000000000000000000000000000
 +        private double hitboxSize;
 +        private double trajectoryRandomness = 1.0D;
 +        private int selfCollisionTicks = 5;
-+        private boolean copyTargetYPosition = true;
++        private boolean copyTargetYPosition = false;
 +        private boolean smoothPotion = false;
 +
 +        private ProjectileSettings(double launchSpeed, double speedMultiplier, double gravity, double hitboxSize) {
